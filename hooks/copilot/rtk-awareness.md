@@ -1,6 +1,6 @@
 # RTK — Copilot Integration (VS Code Copilot Chat + Copilot CLI)
 
-**Usage**: Token-optimized CLI proxy (60-90% savings on dev operations)
+**Usage**: Token-optimized CLI proxy (cuts up to 90% of bash output)
 
 ## What's automatic
 
@@ -56,5 +56,5 @@ When Copilot CLI adds `updatedInput` support, only `rtk hook` needs updating —
 | Claude Code           | `PreToolUse` hook with `updatedInput`   | Transparent rewrite      | `hooks/rtk-rewrite.sh`             |
 | VS Code Copilot Chat  | `PreToolUse` hook with `updatedInput`   | Transparent rewrite      | `.github/hooks/rtk-rewrite.json`   |
 | GitHub Copilot CLI    | `PreToolUse` deny-with-suggestion       | Denial + retry           | `.github/hooks/rtk-rewrite.json`   |
-| OpenCode              | Plugin `tool.execute.before`            | Transparent rewrite      | `hooks/opencode-rtk.ts`            |
+| OpenCode              | Plugin `execute.before` (v2) / `tool.execute.before` (v1, >= 1.18.29) | Transparent rewrite | `hooks/opencode/rtk.ts`            |
 | (any)                 | Custom instructions                     | Prompt-level guidance    | `.github/copilot-instructions.md`  |

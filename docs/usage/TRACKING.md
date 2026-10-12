@@ -1,6 +1,10 @@
 # RTK Tracking API Documentation
 
-Comprehensive documentation for RTK's token savings tracking system.
+Comprehensive documentation for RTK's tracking system, which records how much **bash output** each filtered command removed.
+
+Everything the tracker stores is measured on bash output bytes, converted to estimated tokens. Bash output is one contributor to input tokens, alongside your prompt, the system prompt and conversation history, and input tokens are in turn only part of the bill, which also counts output tokens. `savings_pct` is therefore a **bash output byte ratio** — not a cost figure and not a share of your token bill.
+
+See [How RTK Savings Work](../guide/resources/savings-explained.md) for the full breakdown.
 
 ## Table of Contents
 
@@ -14,9 +18,9 @@ Comprehensive documentation for RTK's token savings tracking system.
 
 ## Overview
 
-RTK's tracking system records every command execution to provide analytics on token savings. The system:
+RTK's tracking system records every command execution to provide analytics on bash output reduction. The system:
 - Stores command history in SQLite (~/.local/share/rtk/tracking.db)
-- Tracks input/output tokens, savings percentage, and execution time
+- Tracks estimated input/output tokens, bash output reduction percentage, and execution time
 - Automatically cleans up records older than 90 days
 - Provides aggregation APIs (daily/weekly/monthly)
 - Exports to JSON/CSV for external integrations
@@ -75,8 +79,8 @@ impl Tracker {
         &self,
         original_cmd: &str,      // Standard command (e.g., "ls -la")
         rtk_cmd: &str,            // RTK command (e.g., "rtk ls")
-        input_tokens: usize,      // Estimated input tokens
-        output_tokens: usize,     // Actual output tokens
+        input_tokens: usize,      // Estimated tokens from raw output (bytes / 4)
+        output_tokens: usize,     // Estimated tokens after filtering (bytes / 4)
         exec_time_ms: u64,        // Execution time in milliseconds
     ) -> Result<()>;
 
@@ -106,8 +110,8 @@ pub struct GainSummary {
     pub total_commands: usize,              // Total commands recorded
     pub total_input: usize,                 // Total input tokens
     pub total_output: usize,                // Total output tokens
-    pub total_saved: usize,                 // Total tokens saved
-    pub avg_savings_pct: f64,               // Average savings percentage
+    pub total_saved: usize,                 // Total estimated tokens saved
+    pub avg_savings_pct: f64,               // Average bash output reduction, in percent
     pub total_time_ms: u64,                 // Total execution time (ms)
     pub avg_time_ms: u64,                   // Average execution time (ms)
     pub by_command: Vec<(String, usize, usize, f64, u64)>, // Top 10 commands
@@ -127,7 +131,7 @@ pub struct DayStats {
     pub input_tokens: usize,     // Total input tokens
     pub output_tokens: usize,    // Total output tokens
     pub saved_tokens: usize,     // Total tokens saved
-    pub savings_pct: f64,        // Savings percentage
+    pub savings_pct: f64,        // Bash output reduction, in percent
     pub total_time_ms: u64,      // Total execution time (ms)
     pub avg_time_ms: u64,        // Average execution time (ms)
 }
@@ -178,8 +182,8 @@ Individual command record from history.
 pub struct CommandRecord {
     pub timestamp: DateTime<Utc>, // UTC timestamp
     pub rtk_cmd: String,           // RTK command used
-    pub saved_tokens: usize,       // Tokens saved
-    pub savings_pct: f64,          // Savings percentage
+    pub saved_tokens: usize,       // Estimated tokens saved
+    pub savings_pct: f64,          // Bash output reduction, in percent
 }
 ```
 
@@ -205,6 +209,8 @@ impl TimedExecution {
 ```
 
 ### Utility Functions
+
+`rtk gain` estimates tokens as `bytes / 4` (`src/core/tracking.rs:1284`). RTK ships no real tokenizer by design: embedding one would cost startup time and would require a tokenizer per model, or a per-session model lookup, which RTK does not implement. The same estimator is applied to raw and filtered output, so the percentage is reliable; the absolute token counts are approximate and will not match your provider's billing.
 
 ```rust
 /// Estimate token count (~4 chars = 1 token)
@@ -277,7 +283,7 @@ fn main() -> anyhow::Result<()> {
 For commands that stream output or run interactively (no output capture):
 
 ```rust
-use rtk::tracking::TimedExecution;
+use rtk::tracking::{passthrough_label, TimedExecution};
 
 fn main() -> anyhow::Result<()> {
     let timer = TimedExecution::start();
@@ -285,8 +291,11 @@ fn main() -> anyhow::Result<()> {
     // Execute streaming command (e.g., git tag --list)
     execute_streaming_command()?;
 
-    // Track timing only (input_tokens=0, output_tokens=0)
-    timer.track_passthrough("git tag --list", "rtk git tag --list");
+    // Track timing only (input_tokens=0, output_tokens=0). The rtk_cmd is
+    // "rtk:passthrough git tag --list", so the row stays apart from a filtered
+    // "rtk git tag --list" run.
+    let tracked = "git tag --list";
+    timer.track_passthrough(tracked, &passthrough_label(tracked));
 
     Ok(())
 }
@@ -369,7 +378,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Install RTK
-        run: cargo install --git https://github.com/rtk-ai/rtk
+        run: cargo install --git https://github.com/rtk-ai/rtk --branch master
 
       - name: Export weekly stats
         run: |
@@ -491,15 +500,22 @@ CREATE TABLE commands (
     timestamp TEXT NOT NULL,           -- RFC3339 UTC timestamp
     original_cmd TEXT NOT NULL,        -- Original command (e.g., "ls -la")
     rtk_cmd TEXT NOT NULL,             -- RTK command (e.g., "rtk ls")
-    input_tokens INTEGER NOT NULL,     -- Estimated input tokens
-    output_tokens INTEGER NOT NULL,    -- Actual output tokens
+    input_tokens INTEGER NOT NULL,     -- Estimated tokens from raw output (bytes / 4)
+    output_tokens INTEGER NOT NULL,    -- Estimated tokens after filtering (bytes / 4)
     saved_tokens INTEGER NOT NULL,     -- input_tokens - output_tokens
-    savings_pct REAL NOT NULL,         -- (saved/input) * 100
+    savings_pct REAL NOT NULL,         -- (saved/input) * 100, a bash output byte ratio
     exec_time_ms INTEGER DEFAULT 0     -- Execution time in milliseconds
 );
 
 CREATE INDEX idx_timestamp ON commands(timestamp);
 ```
+
+Both command columns store the command's words as given, each quoted only when
+it needs to be (`display_args` / `quote_word` in `src/core/shell.rs`, the rules of
+Python's `shlex.quote`), so `grep 'a b' f` and `grep a b f` stay distinct and a
+row reads back as the same words. `rtk_cmd` starts with `rtk`, with
+`rtk:toml` for a TOML-filtered run, or with `rtk:passthrough` for a run passed
+through unfiltered (`passthrough_label`).
 
 ### Automatic Cleanup
 
@@ -578,6 +594,6 @@ Planned improvements (contributions welcome):
 
 ## See Also
 
-- [README.md](../README.md) - Main project documentation
-- [COMMAND_AUDIT.md](../claudedocs/COMMAND_AUDIT.md) - List of all RTK commands
+- [README.md](../../README.md) - Main project documentation
+- [What RTK covers](../guide/resources/what-rtk-covers.md) - The commands RTK filters
 - [Rust docs](https://docs.rs/) - Run `cargo doc --open` for API docs
